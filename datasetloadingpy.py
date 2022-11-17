@@ -1,5 +1,6 @@
 import os
 import glob
+import torch
 import numpy as np
 import sys
 import cv2
@@ -10,6 +11,8 @@ class Dataset(object):
         self._data_partition = data_partition
         self._data_dir = data_dir
         self._data_suffix = data_suffix
+
+        #self._getting_data = True
 
         self._label_fp = label_fp
         self.label_idx = -3
@@ -55,17 +58,20 @@ class Dataset(object):
         try:
             if filename.endswith('.npz'):
                 return np.load(filename)['data']
-
+            else:
+                return np.load(filename)
         except IOError:
             print('Error when reading file: {}'.format(filename))
             sys.exit()
 
     def __getitem__(self, idx):
-
+        #try:
         raw_data = self.load_data(self.list[idx][0])
         preprocess_data = self.preprocessing_func(raw_data)
         label = self.list[idx][1]
         return preprocess_data, label
+        #except KeyError:
+        #    print("Data loaded up to idx {}".format(str(idx)))
 
     def __len__(self):
         return len(self._data_files)
@@ -218,7 +224,30 @@ def preprocess_creation():
 
     return preprocessing
 
-def dataloaders(data_dir, label_fp):
+
+def collate_fn(batch):
+    if len(batch) == 1:
+        data, lengths, labels_np, = zip(*[(a, a.shape[0], b) for (a, b) in sorted(batch, key=lambda x: x[0].shape[0], reverse=True)])
+        data = torch.FloatTensor(data)
+        lengths = [data.size(1)]
+
+    if len(batch) > 1:
+        data_list, lengths, labels_np = zip(*[(a, a.shape[0], b) for (a, b) in sorted(batch, key=lambda x: x[0].shape[0], reverse=True)])
+
+        if data_list[0].ndim == 3:
+            max_len, h, w = data_list[0].shape  # since it is sorted, the longest video is the first one
+            data_np = np.zeros((len(data_list), max_len, h, w))
+        elif data_list[0].ndim == 1:
+            max_len = data_list[0].shape[0]
+            data_np = np.zeros((len(data_list), max_len))
+        for idx in range(len(data_np)):
+            data_np[idx][:data_list[idx].shape[0]] = data_list[idx]
+        data = torch.FloatTensor(data_np)
+    labels = torch.LongTensor(labels_np)
+    return data, lengths, labels
+
+
+def dataloaders(data_dir, label_fp, batch_size, workers=1):
     preprocessing = preprocess_creation()
 
     #create datasets for train,test,val partitions
@@ -229,4 +258,12 @@ def dataloaders(data_dir, label_fp):
                                    data_suffix='.npz')
                 for partition in ['train', 'test']}
 
-    return datasets
+    dset_loaders = {x: torch.utils.data.DataLoader(
+                        datasets[x],
+                        batch_size=batch_size,
+                        shuffle=True,
+                        collate_fn=collate_fn,
+                        pin_memory=True,
+                        num_workers=workers,
+                        worker_init_fn=np.random.seed(1)) for x in ['train', 'test']}
+    return dset_loaders
