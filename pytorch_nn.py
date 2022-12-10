@@ -6,6 +6,7 @@ from tqdm import tqdm
 import math
 import torch.nn.functional as F
 from fastai.layers import *
+from torchvision import models
 #%%
 '''Basic Structure for Neural Network:
     3D Convolution Blocks -> MaxPool3D -> (Convert to 2D tensor) -> ResNet -> (Flatten) -> 1D Convolution Blocks -> Prediction'''
@@ -18,13 +19,26 @@ def threeD_to_2D_tensor(x):
     x = x.transpose(1, 2)
     return x.reshape(n_batch*s_time, n_channels, sx, sy)
 #%%
+
+def _average_batch(x, lengths):
+    return torch.stack([torch.mean( x[index][:,0:i], 1) for index, i in enumerate(lengths)],0)
+
+
 def _3d_block(in_size, out_size, kernel_size, stride, padding, bias=False, relu_type='prelu'):
     return nn.Sequential(
         nn.Conv3d(in_size, out_size, kernel_size=kernel_size, stride=stride, padding=padding, bias=bias),
         nn.BatchNorm3d(out_size),
         nn.PReLU(num_parameters=out_size) if relu_type== 'prelu' else nn.ReLU()
     )
-#%%
+
+
+def _downsample_basic_block(inplanes, outplanes, stride):
+    return nn.Sequential(
+                nn.Conv2d(inplanes, outplanes, kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(outplanes),
+            )
+
+
 def _bottleneck_conv_block(ni, nf, stride):
     return nn.Sequential(
         ConvLayer(ni,nf//4, 1),
@@ -39,7 +53,7 @@ def _conv_block(ni,nf,stride):
     )
 #%%
 class ResBlock(nn.Module):
-    def __init__(self, ni, nf, stride=1, bottled=True):
+    def __init__(self, ni, nf, stride=1, bottled=False):
         super(ResBlock, self).__init__()
         self.convs = _bottleneck_conv_block(ni, nf, stride) if bottled else _conv_block(ni, nf, stride)
         self.idconv = noop if ni == nf else ConvLayer(ni, nf, 1, act_cls=None)
@@ -52,8 +66,10 @@ class ResNet(nn.Sequential):
     def __init__(self, layers, expansion=1):
 
         #self.relu_type= relu_type
+        self.bottled = True if expansion > 1 else False
         self.block_sizes = [64, 64, 128, 256, 512]
-        for i in range(1, len(self.block_sizes)): self.block_sizes[i] *= expansion
+        #for i in range(1, len(self.block_sizes)): self.block_sizes[i] *= expansion
+        for i in range(1, 5): self.block_sizes[i] *= expansion
         blocks = [self._make_layer(*o) for o in enumerate(layers)]
 
         super().__init__(*blocks, nn.AdaptiveAvgPool2d(1))
@@ -67,17 +83,34 @@ class ResNet(nn.Sequential):
         stride = 1 if idx==0 else 2
         ch_in, ch_out = self.block_sizes[idx:idx+2]
         return nn.Sequential(*[
-            ResBlock(ch_in if i==0 else ch_out, ch_out, stride if i==0 else 1)
+            ResBlock(ch_in if i==0 else ch_out, ch_out, stride if i==0 else 1, self.bottled)
             for i in range(n_layers)
         ])
 
 #%%
+class Chomp1d(nn.Module):
+    def __init__(self, chomp_size, symm_chomp):
+        super(Chomp1d, self).__init__()
+        self.chomp_size = chomp_size
+        self.symm_chomp = symm_chomp
+        if self.symm_chomp:
+            assert self.chomp_size % 2 == 0, "If symmetric chomp, chomp size needs to be even"
+    def forward(self, x):
+        if self.chomp_size == 0:
+            return x
+        if self.symm_chomp:
+            return x[:, :, self.chomp_size//2:-self.chomp_size//2].contiguous()
+        else:
+            return x[:, :, :-self.chomp_size].contiguous()
+
+
 class BasicBlock1D(nn.Module):
     def __init__(self, n_inputs, n_outputs, kernel_size, stride, dilation, padding, dropout=0.2, relu_type='relu'):
         super(BasicBlock1D, self).__init__()
 
         self.conv1 = nn.Conv1d(n_inputs, n_outputs, kernel_size, stride=stride, padding=padding, dilation=dilation)
         self.batchnorm1 = nn.BatchNorm1d(n_outputs)
+        self.chomp1 = Chomp1d(padding, True)
         if relu_type == 'relu':
             self.relu1 = nn.ReLU()
         elif relu_type == 'prelu':
@@ -85,6 +118,7 @@ class BasicBlock1D(nn.Module):
         self.dropout1 = nn.Dropout(dropout)
         self.conv2 = nn.Conv1d(n_outputs, n_outputs, kernel_size, stride=stride, padding=padding, dilation=dilation)
         self.batchnorm2 = nn.BatchNorm1d(n_outputs)
+        self.chomp2 = Chomp1d(padding, True)
         if relu_type == 'relu':
             self.relu2 = nn.ReLU()
         elif relu_type == 'prelu':
@@ -98,17 +132,24 @@ class BasicBlock1D(nn.Module):
             self.relu = nn.PReLU(num_parameters=n_outputs)
 
     def forward(self, x):
+        #print("BASIC BLOCK 1D START")
         out = self.conv1(x)
+        #print("Conv1 Out: " + str(out.shape))
         out = self.batchnorm1(out)
+        out = self.chomp1(out)
         out = self.relu1(out)
         out = self.dropout1(out)
 
         out = self.conv2(out)
         out = self.batchnorm2(out)
+        out = self.chomp2(out)
         out = self.relu2(out)
         out = self.dropout2(out)
+        #print("Drop2 Out: " + str(out.shape))
 
         res = x if self.downsample is None else self.downsample(x)
+        #print("Res shape: " + str(res.shape))
+        #print("BASIC BLOCK 1D END")
         return self.relu(out + res)
 #%%
 class ConvNet1D(nn.Module):
@@ -120,35 +161,65 @@ class ConvNet1D(nn.Module):
             dilation_size = 2 ** i
             in_channels = num_inputs if i==0 else num_channels[i-1]
             out_channels = num_channels[i]
-            layers.append(BasicBlock1D(in_channels, out_channels, kernel_size, stride=1, dilation=dilation_size, padding=1, dropout=dropout, relu_type=relu_type))
+            layers.append(BasicBlock1D(in_channels, out_channels, kernel_size, stride=1, dilation=dilation_size,
+                                       padding=(kernel_size-1) * dilation_size, dropout=dropout, relu_type=relu_type))
         self.network = nn.Sequential(*layers)
         self.convnet_output = nn.Linear(num_channels[-1], num_classes)
-    def forward(self, x):
+    def forward(self, x, lengths):
         x = self.network(x)
+        x = _average_batch(x, lengths)
         return self.convnet_output(x)
 #%%
 class Lipreading1(nn.Module):
-    def __init__(self, num_classes, relu_type = 'prelu'):
+    def __init__(self, num_classes, pretrained=False, relu_type = 'prelu'):
         super(Lipreading1, self).__init__()
-        self.kernel_size=3
-        self.dropout=0.2
+        self.kernel_size = 3
+        self.dropout = 0.2
         self.frontend_out = 64
         self.backend_out = 512
+        self.expansion = 4
+        self.num_classes = num_classes
 
-        self.frontend3D = _3d_block(1, self.frontend_out, kernel_size=(3,3,3), stride=(1,2,2), padding=(1,1,1))
+        self.frontend3D = _3d_block(1, self.frontend_out, kernel_size=(5,7,7), stride=(1,2,2), padding=(2,3,3))
         self.max_pool1 = nn.MaxPool3d(kernel_size=(1,3,3), stride=(1,2,2), padding=(0,1,1))
         self.trunk = ResNet([3,4,6,3], expansion=4)
-        self.flatten = nn.Flatten()
-        self.tcn = ConvNet1D(self.backend_out, [256, 512], num_classes, kernel_size=self.kernel_size, dropout=self.dropout, relu_type=relu_type)
+        #self.downsample_block = _downsample_basic_block(928, self.backend_out, 1)
+        #self.flatten = nn.Flatten()
+        self.tcn = ConvNet1D(self.backend_out * self.expansion, [1024, 512, 256], num_classes, kernel_size=self.kernel_size, dropout=self.dropout, relu_type=relu_type)
+        #self.convnet_output = nn.Linear(self.backend_out, num_classes)
 
         self._initialize_weights_randomly()
 
-    def forward(self, x):
+        if pretrained:
+            pretrained_model = models.resnet50(pretrained=True)
+            # pretrained_model.fc = nn.Linear(pretrained_model.fc.in_features, num_classes)
+            self.resnet.load_state_dict(pretrained_model.state_dict(), strict=False)
+            for param in self.resnet.parameters():
+                param.requires_grad = False
+
+    def forward(self, x, lengths):
+        #print("Initial Shape: " + str(x.shape))
+        B, C, T, H, W = x.size()
         x = self.frontend3D(x)
+        #print("3D Out Shape: " + str(x.shape))
+        x = self.max_pool1(x)
+        #print("3D Max Pool Shape: " + str(x.shape))
+        Tnew = x.shape[2]
         x = threeD_to_2D_tensor(x)
+        #print("New 2D Shape: " + str(x.shape))
         x = self.trunk(x)
-        x = self.flatten(x)
-        return self.tcn(x)
+        #print("ResNet Out Shape: " + str(x.shape))
+        x = x.view(x.size(0), -1)
+        #output = output.view(x.shape[0], -1, self.num_classes)
+        #print("ResNet (Actual) Out Shape: " + str(x.shape))
+        x = x.view(B, Tnew, x.size(1))
+        #x = self.downsample_block(x)
+        #print("Downsample Out Shape: " + str(x.shape))
+        #x = self.flatten(x)
+        #print("Flattened Shape: " + str(x.shape))
+        x = x.transpose(1, 2)
+        #print("Transposed Flattened Shape: " + str(x.shape))
+        return self.tcn(x, lengths)
 
     def _initialize_weights_randomly(self):
 
