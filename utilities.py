@@ -40,17 +40,26 @@ class CosineScheduler:
         reduction_ratio = 0.5 * (1 + math.cos(math.pi * epoch / self.epochs))
         change_lr_on_optimizer(optimizer, self.lr_ori*reduction_ratio)
 
-init_lr = 3e-4
+
+def showLR(optimizer):
+    return optimizer.param_groups[0]['lr']
 
 
-def get_optimizer(type, optim_policies):
+def get_optimizer(type, optim_policies, lr):
     # -- define optimizer
     if type == 'adam':
-        optimizer = optim.Adam(optim_policies, lr=init_lr, weight_decay=1e-4)
+        optimizer = optim.Adam(optim_policies, lr=lr, weight_decay=1e-4)
     elif type == 'adamw':
-        optimizer = optim.AdamW(optim_policies, lr=init_lr, weight_decay=1e-2)
+        optimizer = optim.AdamW(optim_policies, lr=lr, weight_decay=1e-2)
     elif type == 'sgd':
-        optimizer = optim.SGD(optim_policies, lr=init_lr, weight_decay=1e-4, momentum=0.9)
+        optimizer = optim.SGD(optim_policies, lr=lr, weight_decay=1e-4, momentum=0.9)
     else:
         raise NotImplementedError
     return optimizer
+
+
+def get_wordslist_from_txt_file(file_path):
+    with open(file_path) as file:
+        word_list = file.readlines()
+        word_list = [item.rstrip() for item in word_list]
+    return word_list

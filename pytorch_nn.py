@@ -46,9 +46,9 @@ def _bottleneck_conv_block(ni, nf, stride):
         ConvLayer(nf//4, nf, 1, act_cls=None, norm_type=NormType.BatchZero)
     )
 #%%
-def _conv_block(ni,nf,stride):
+def _conv_block(ni, nf, stride):
     return nn.Sequential(
-        ConvLayer(ni,nf, stride=stride),
+        ConvLayer(ni, nf, stride=stride),
         ConvLayer(nf, nf, 1, act_cls=None, norm_type=NormType.BatchZero)
     )
 #%%
@@ -67,9 +67,10 @@ class ResNet(nn.Sequential):
 
         #self.relu_type= relu_type
         self.bottled = True if expansion > 1 else False
-        self.block_sizes = [64, 64, 128, 256, 512]
+        #self.block_sizes = [64, 64, 128, 256, 128]
+        self.block_sizes = [64, 128, 256, 128]
         #for i in range(1, len(self.block_sizes)): self.block_sizes[i] *= expansion
-        for i in range(1, 5): self.block_sizes[i] *= expansion
+        for i in range(1, len(self.block_sizes)): self.block_sizes[i] *= expansion
         blocks = [self._make_layer(*o) for o in enumerate(layers)]
 
         super().__init__(*blocks, nn.AdaptiveAvgPool2d(1))
@@ -164,11 +165,12 @@ class ConvNet1D(nn.Module):
             layers.append(BasicBlock1D(in_channels, out_channels, kernel_size, stride=1, dilation=dilation_size,
                                        padding=(kernel_size-1) * dilation_size, dropout=dropout, relu_type=relu_type))
         self.network = nn.Sequential(*layers)
-        self.convnet_output = nn.Linear(num_channels[-1], num_classes)
+        #self.convnet_output = nn.Linear(num_channels[-1], num_classes)
+
     def forward(self, x, lengths):
         x = self.network(x)
         x = _average_batch(x, lengths)
-        return self.convnet_output(x)
+        return x
 #%%
 class Lipreading1(nn.Module):
     def __init__(self, num_classes, pretrained=False, relu_type = 'prelu'):
@@ -176,16 +178,21 @@ class Lipreading1(nn.Module):
         self.kernel_size = 3
         self.dropout = 0.2
         self.frontend_out = 64
-        self.backend_out = 512
-        self.expansion = 4
+        self.backend_out = 128
+        self.expansion = 2
+        self.convolution_channels = [512, 256]
         self.num_classes = num_classes
 
-        self.frontend3D = _3d_block(1, self.frontend_out, kernel_size=(5,7,7), stride=(1,2,2), padding=(2,3,3))
+        self.frontend3D = _3d_block(1, 32, kernel_size=(5,7,7), stride=(1,2,2), padding=(2,3,3))
+        self.frontend3D_2 = _3d_block(32, self.frontend_out, kernel_size=(5,7,7), stride=(1,2,2), padding=(2,3,3))
         self.max_pool1 = nn.MaxPool3d(kernel_size=(1,3,3), stride=(1,2,2), padding=(0,1,1))
-        self.trunk = ResNet([3,4,6,3], expansion=4)
+        #self.trunk = ResNet([3,4,6,3], expansion=4)
+        #TESTING DIFF TRUNK FOR FASTER COMP
+        self.trunk = ResNet([2, 3, 2], expansion=self.expansion)
         #self.downsample_block = _downsample_basic_block(928, self.backend_out, 1)
         #self.flatten = nn.Flatten()
-        self.tcn = ConvNet1D(self.backend_out * self.expansion, [1024, 512, 256], num_classes, kernel_size=self.kernel_size, dropout=self.dropout, relu_type=relu_type)
+        self.tcn = ConvNet1D(self.backend_out * self.expansion, self.convolution_channels, num_classes, kernel_size=self.kernel_size, dropout=self.dropout, relu_type=relu_type)
+        self.convnet_output = nn.Linear(self.convolution_channels[-1], num_classes)
         #self.convnet_output = nn.Linear(self.backend_out, num_classes)
 
         self._initialize_weights_randomly()
@@ -201,6 +208,8 @@ class Lipreading1(nn.Module):
         #print("Initial Shape: " + str(x.shape))
         B, C, T, H, W = x.size()
         x = self.frontend3D(x)
+        #Testing second 3D layer and removing ResNet Layer for faster computation
+        x = self.frontend3D_2(x)
         #print("3D Out Shape: " + str(x.shape))
         x = self.max_pool1(x)
         #print("3D Max Pool Shape: " + str(x.shape))
@@ -219,7 +228,8 @@ class Lipreading1(nn.Module):
         #print("Flattened Shape: " + str(x.shape))
         x = x.transpose(1, 2)
         #print("Transposed Flattened Shape: " + str(x.shape))
-        return self.tcn(x, lengths)
+        x = self.tcn(x, lengths)
+        return self.convnet_output(x)
 
     def _initialize_weights_randomly(self):
 
