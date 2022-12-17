@@ -51,7 +51,14 @@ def _conv_block(ni, nf, stride):
         ConvLayer(ni, nf, stride=stride),
         ConvLayer(nf, nf, 1, act_cls=None, norm_type=NormType.BatchZero)
     )
-#%%
+
+def _2d_stem(*sizes):
+    return nn.Sequential(*[
+        ConvLayer(sizes[i], sizes[i+1], 3, stride=2 if i==0 else 1)
+            for i in range(len(sizes)-1)
+    ] + [nn.MaxPool2d(kernel_size=(3,3), stride=(2,2))])
+
+
 class ResBlock(nn.Module):
     def __init__(self, ni, nf, stride=1, bottled=False):
         super(ResBlock, self).__init__()
@@ -154,7 +161,7 @@ class BasicBlock1D(nn.Module):
         return self.relu(out + res)
 #%%
 class ConvNet1D(nn.Module):
-    def __init__(self, num_inputs, num_channels, num_classes, kernel_size=3, dropout=0.2, relu_type='relu'):
+    def __init__(self, num_inputs, num_channels, kernel_size=3, dropout=0.2, relu_type='relu'):
         super(ConvNet1D, self).__init__()
 
         layers = []
@@ -191,7 +198,7 @@ class Lipreading1(nn.Module):
         self.trunk = ResNet([2, 3, 2], expansion=self.expansion)
         #self.downsample_block = _downsample_basic_block(928, self.backend_out, 1)
         #self.flatten = nn.Flatten()
-        self.tcn = ConvNet1D(self.backend_out * self.expansion, self.convolution_channels, num_classes, kernel_size=self.kernel_size, dropout=self.dropout, relu_type=relu_type)
+        self.tcn = ConvNet1D(self.backend_out * self.expansion, self.convolution_channels, kernel_size=self.kernel_size, dropout=self.dropout, relu_type=relu_type)
         self.convnet_output = nn.Linear(self.convolution_channels[-1], num_classes)
         #self.convnet_output = nn.Linear(self.backend_out, num_classes)
 
@@ -257,3 +264,55 @@ class Lipreading1(nn.Module):
                 n = float(m.weight.data[0].nelement())
                 m.weight.data = m.weight.data.normal_(0, f(n))
 #%%
+class ResNet2(nn.Sequential):
+    def __init__(self, layers, expansion=1):
+
+        #self.relu_type= relu_type
+        self.bottled = True if expansion > 1 else False
+        self.block_sizes = [64, 128, 256]
+        for i in range(1, len(self.block_sizes)): self.block_sizes[i] *= expansion
+        blocks = [self._make_layer(*o) for o in enumerate(layers)]
+
+        super().__init__(*blocks, nn.AdaptiveAvgPool2d(1))
+
+    def _make_layer(self, idx, n_layers):
+        stride = 1 if idx==0 else 2
+        ch_in, ch_out = self.block_sizes[idx:idx+2]
+        return nn.Sequential(*[
+            ResBlock(ch_in if i==0 else ch_out, ch_out, stride if i==0 else 1, self.bottled)
+            for i in range(n_layers)
+        ])
+
+class Lipread2(nn.Module):
+    def __init__(self, num_classes, relu_type = 'prelu'):
+        super(Lipread2, self).__init__()
+        self.kernel_size = 3
+        self.dropout = 0.2
+        self.frontend_out = 64
+        self.backend_out = 256
+        self.expansion = 4
+        self.convolution_channels = [512, 256, 128]
+        self.num_classes = num_classes
+
+        self.frontend3D = _3d_block(1, 32, kernel_size=(5,7,7), stride=(1,2,2), padding=(2,3,3))
+        self.max_pool1 = nn.MaxPool3d(kernel_size=(1,3,3), stride=(1,2,2), padding=(0,1,1))
+        self.stem = _2d_stem(32, 32, 64)
+        self.trunk = ResNet2([3,3], expansion=self.expansion)
+
+        self.tcn = ConvNet1D(self.backend_out * self.expansion, self.convolution_channels, kernel_size=self.kernel_size, dropout=self.dropout, relu_type=relu_type)
+        self.convnet_output = nn.Linear(self.convolution_channels[-1], num_classes)
+
+    def forward(self, x, lengths):
+        B, C, T, H, W = x.size()
+        x = self.frontend3D(x)
+        x = self.max_pool1(x)
+        Tnew = x.shape[2]
+        x = threeD_to_2D_tensor(x)
+        x = self.stem(x)
+        x = self.trunk(x)
+        x = x.view(x.size(0), -1)
+        x = x.view(B, Tnew, x.size(1))
+        x = x.transpose(1, 2)
+        x = self.tcn(x, lengths)
+        x = self.convnet_output(x)
+        return x
