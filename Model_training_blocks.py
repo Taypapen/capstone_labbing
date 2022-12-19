@@ -112,31 +112,27 @@ class FullTrainer(object):
         self._initialize_weights_randomly()
 
         if state_path is not None:
-            self.load_checkpoint(self.model, self.optimizer)
+            self.load_checkpoint(optim)
 
         self.initialize_training()
 
         self.eval_best_performance()
 
-    def load_checkpoint(self, model, optimizer):
+    def load_checkpoint(self, optim_type):
         checkpoint = torch.load(self.state_path)
         loaded_state_dict = checkpoint['model_state_dict']
         if self.allow_size_mismatch:
-            loaded_sizes = {k: v.shape for k, v in loaded_state_dict.items()}
-            model_state_dict = model.state_dict()
-            model_sizes = {k: v.shape for k, v in model_state_dict.items()}
-            mismatched_params = []
-            for k in loaded_sizes:
-                if loaded_sizes[k] != model_sizes[k]:
-                    mismatched_params.append(k)
-            for k in mismatched_params:
-                del loaded_state_dict[k]
-        self.model = model.load_state_dict(loaded_state_dict, strict=False)
-        self.optimizer = get_optimizer(optim, self.model.parameters(), lr=self.lr)
+            new_state_dict = {}
+            for k, v in checkpoint['model_state_dict'].items():
+                if k in self.model.state_dict() and self.model.state_dict()[k].shape == v.shape:
+                    new_state_dict[k] = v
+            loaded_state_dict = new_state_dict
+        self.model.load_state_dict(loaded_state_dict, strict=False)
+        self.optimizer = get_optimizer(optim_type, self.model.parameters(), lr=self.lr)
         if not self.model_only:
             self.epoch = checkpoint['epoch_idx']
             if self.epoch != self.epochs:
-                self.optimizer = optimizer.load_state_dict(checkpoint['optimimzer_state_dict'])
+                self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
                 self.scheduler.adjust_lr(self.optimizer, self.epoch - 1)
                 self.best_perf = checkpoint['best_perf']
 
