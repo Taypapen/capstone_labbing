@@ -66,12 +66,14 @@ def train_loop(model, dataloader, criterion, epoch, optimizer, mixup=False):
     return model
 
 
-def evaluate(model, dset_loader, criterion):
+def evaluate(model, dset_loader, criterion, profiler=None):
 
     model.eval()
 
     running_loss = 0.
     running_corrects = 0.
+    if profiler is not None:
+        profiler.start()
 
     with torch.no_grad():
         for batch_idx, (input, lengths, labels) in enumerate(tqdm(dset_loader)):
@@ -82,7 +84,12 @@ def evaluate(model, dset_loader, criterion):
             loss = criterion(logits, labels.cuda())
             running_loss += loss.item() * input.size(0)
 
-    print('{} in total\tCR: {}'.format( len(dset_loader.dataset), running_corrects/len(dset_loader.dataset)))
+            if profiler is not None:
+                profiler.step()
+
+    print('{} in total\tCR: {}'.format(len(dset_loader.dataset), running_corrects/len(dset_loader.dataset)))
+    if profiler is not None:
+        profiler.stop()
     return running_corrects/len(dset_loader.dataset), running_loss/len(dset_loader.dataset)
 
 
@@ -114,9 +121,13 @@ class FullTrainer(object):
         if state_path is not None:
             self.load_checkpoint(optim)
 
-        self.initialize_training()
+        if epochs == 0:
+            self.profiler_activation()
+            self.test_performance()
 
-        self.eval_best_performance()
+        else:
+            self.initialize_training()
+            self.eval_best_performance()
 
     def load_checkpoint(self, optim_type):
         checkpoint = torch.load(self.state_path)
@@ -201,4 +212,15 @@ class FullTrainer(object):
         if self.is_best:
             shutil.copyfile(checkpoint_fp, best_filepath)
 
+    def profiler_activation(self):
+        self.prof = torch.profiler.profile(
+                schedule=torch.profiler.schedule(wait=1, warmup=1, active=3),
+                on_trace_ready=torch.profiler.tensorboard_trace_handler(os.path.join(self.save_dir, 'profile_log')),
+                record_shapes=True,
+                profile_memory=True,
+                with_stack=True)
 
+    def test_performance(self):
+        acc_avg_val, loss_avg_val = evaluate(self.model, self.dataset['test'], self.criterion, self.prof)
+        print('{} Loss val: {:.4f}\tAcc val:{:.4f}'.format('test', loss_avg_val, acc_avg_val))
+        return self.prof
