@@ -3,7 +3,6 @@ import numpy as np
 import datetime
 import logging
 import math
-import torch
 import torch.optim as optim
 
 

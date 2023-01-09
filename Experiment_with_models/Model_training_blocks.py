@@ -38,7 +38,7 @@ def train_loop(model, dataloader, criterion, epoch, optimizer, mixup=False):
 
         optimizer.zero_grad()
 
-        logits = model(input.unsqueeze(1).cuda(), lengths=lengths)
+        logits = model(input.cuda(), lengths=lengths)
 
         if mixup:
             loss_func = mixup_criterion(labels_a, labels_b, lam)
@@ -77,7 +77,7 @@ def evaluate(model, dset_loader, criterion, profiler=None):
 
     with torch.no_grad():
         for batch_idx, (input, lengths, labels) in enumerate(tqdm(dset_loader)):
-            logits = model(input.unsqueeze(1).cuda(), lengths=lengths)
+            logits = model(input.cuda(), lengths=lengths)
             _, preds = torch.max(F.softmax(logits, dim=1).data, dim=1)
             running_corrects += preds.eq(labels.cuda().view_as(preds)).sum().item()
 

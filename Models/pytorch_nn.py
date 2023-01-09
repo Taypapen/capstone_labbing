@@ -212,6 +212,7 @@ class Lipreading1(nn.Module):
                 param.requires_grad = False
 
     def forward(self, x, lengths):
+        x = x.unsqueeze(1)
         #print("Initial Shape: " + str(x.shape))
         B, C, T, H, W = x.size()
         x = self.frontend3D(x)
@@ -303,6 +304,7 @@ class Lipread2(nn.Module):
         self.convnet_output = nn.Linear(self.convolution_channels[-1], num_classes)
 
     def forward(self, x, lengths):
+        x = x.unsqueeze(1)
         B, C, T, H, W = x.size()
         x = self.frontend3D(x)
         x = self.max_pool1(x)
